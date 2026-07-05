@@ -1,0 +1,936 @@
+import React, { useState, useEffect, useMemo, useCallback } from "react";
+import {
+  Plus, X, Search, Building2, Calendar, Trash2, Pencil,
+  ClipboardList, TrendingUp, Clock, Briefcase, ChevronDown,
+  AlertCircle, Loader2, Inbox, Lock, Star, Download, Sparkles, Bell
+} from "lucide-react";
+
+/* ---------------------------------------------------------
+   TOKENS
+   Color: ink #1B2E28, evergreen #1B4332, moss #3F6C51,
+          parchment #F6F2E9, gold #C89B3C, alert #B3261E
+   Type: display = Georgia (serif, editorial), body = system-ui,
+         mono/util = ui-monospace (for dates & counters)
+   Signature: the "days waiting" chip — color shifts from moss
+              to gold to alert the longer a lamaran sits without
+              a reply, and cards are sorted oldest-first so the
+              thing that most needs action floats to the top.
+--------------------------------------------------------- */
+
+const COLORS = {
+  ink: "#1B2E28",
+  evergreen: "#1B4332",
+  moss: "#3F6C51",
+  mossLight: "#DCE8DF",
+  parchment: "#F6F2E9",
+  parchmentDeep: "#EDE6D6",
+  gold: "#C89B3C",
+  goldLight: "#F3E6C8",
+  alert: "#B3261E",
+  alertLight: "#F6DEDC",
+  line: "#DDD5C2",
+  ash: "#7A7267",
+};
+
+const STATUSES = [
+  { key: "dilamar", label: "Dilamar", accent: COLORS.moss, tint: COLORS.mossLight },
+  { key: "wawancara", label: "Wawancara / Proses", accent: "#8A6A2F", tint: COLORS.goldLight },
+  { key: "ditawari", label: "Ditawari", accent: COLORS.evergreen, tint: "#D6E3D9" },
+  { key: "ditolak", label: "Ditolak / Selesai", accent: COLORS.ash, tint: "#EAE6DD" },
+];
+
+const PLATFORMS = ["LinkedIn", "Jobstreet", "Glints", "Upwork", "Fiverr", "Instagram", "Referensi", "Website Perusahaan", "Lainnya"];
+
+const STORAGE_KEY = "job-tracker:applications";
+const PREMIUM_KEY = "job-tracker:premium";
+const FREE_LIMIT = 10;
+
+const PREMIUM_PERKS = [
+  "Lamaran tanpa batas (gratis dibatasi 10)",
+  "Pengingat tanggal follow-up otomatis",
+  "Ekspor semua data ke CSV / Excel",
+  "Tandai prioritas pada lamaran penting",
+];
+
+const uid = () => `app_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+const todayISO = () => new Date().toISOString().slice(0, 10);
+
+function daysSince(dateStr) {
+  if (!dateStr) return 0;
+  const then = new Date(dateStr + "T00:00:00");
+  const now = new Date();
+  const diff = Math.floor((now.setHours(0, 0, 0, 0) - then.setHours(0, 0, 0, 0)) / 86400000);
+  return Math.max(0, diff);
+}
+
+function waitTone(days) {
+  if (days < 7) return { bg: COLORS.mossLight, fg: COLORS.evergreen, label: `${days} hari` };
+  if (days < 14) return { bg: COLORS.goldLight, fg: "#8A6A2F", label: `${days} hari` };
+  return { bg: COLORS.alertLight, fg: COLORS.alert, label: `${days} hari` };
+}
+
+function formatDateID(dateStr) {
+  if (!dateStr) return "-";
+  const d = new Date(dateStr + "T00:00:00");
+  return d.toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" });
+}
+
+/* ---------------------------------------------------------
+   MAIN APP
+--------------------------------------------------------- */
+
+export default function App() {
+  const [apps, setApps] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [saveError, setSaveError] = useState(false);
+  const [query, setQuery] = useState("");
+  const [modalOpen, setModalOpen] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const [isPremium, setIsPremium] = useState(false);
+  const [upgradeOpen, setUpgradeOpen] = useState(false);
+
+  // Load from persistent storage
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await Promise.resolve(localStorage.getItem(STORAGE_KEY) ? { value: localStorage.getItem(STORAGE_KEY) } : null);
+        if (res && res.value) {
+          setApps(JSON.parse(res.value));
+        }
+      } catch (e) {
+        // key not found on first run — that's fine
+      }
+      try {
+        const premRes = await Promise.resolve(localStorage.getItem(PREMIUM_KEY) ? { value: localStorage.getItem(PREMIUM_KEY) } : null);
+        if (premRes && premRes.value) setIsPremium(premRes.value === "true");
+      } catch (e) {
+        // no premium flag yet
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, []);
+
+  const activatePremium = async () => {
+    setIsPremium(true);
+    try {
+      localStorage.setItem(PREMIUM_KEY, "true");
+    } catch (e) {
+      // ignore — UI already reflects unlocked state for this session
+    }
+    setUpgradeOpen(false);
+  };
+
+  const exportCSV = () => {
+    if (!isPremium) { setUpgradeOpen(true); return; }
+    const header = ["Perusahaan/Klien", "Posisi/Proyek", "Platform", "Tanggal Melamar", "Status", "Prioritas", "Follow-up", "Catatan"];
+    const rows = apps.map((a) => [
+      a.company, a.role, a.platform || "",
+      a.appliedDate, STATUSES.find((s) => s.key === a.status)?.label || a.status,
+      a.priority ? "Ya" : "Tidak", a.followUpDate || "", (a.notes || "").replace(/\n/g, " "),
+    ]);
+    const csv = [header, ...rows]
+      .map((r) => r.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(","))
+      .join("\n");
+    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `lamaran-kerja-${todayISO()}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const persist = useCallback(async (next) => {
+    setApps(next);
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+      const result = true;
+      setSaveError(!result);
+    } catch (e) {
+      setSaveError(true);
+    }
+  }, []);
+
+  const openAdd = () => {
+    if (!isPremium && apps.length >= FREE_LIMIT) { setUpgradeOpen(true); return; }
+    setEditingId(null);
+    setModalOpen(true);
+  };
+  const openEdit = (id) => { setEditingId(id); setModalOpen(true); };
+
+  const saveApp = (data) => {
+    if (editingId) {
+      persist(apps.map((a) => (a.id === editingId ? { ...a, ...data } : a)));
+    } else {
+      persist([{ id: uid(), ...data }, ...apps]);
+    }
+    setModalOpen(false);
+  };
+
+  const removeApp = (id) => {
+    persist(apps.filter((a) => a.id !== id));
+    setConfirmDeleteId(null);
+  };
+
+  const changeStatus = (id, status) => {
+    persist(apps.map((a) => (a.id === id ? { ...a, status } : a)));
+  };
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return apps;
+    return apps.filter(
+      (a) =>
+        a.company.toLowerCase().includes(q) ||
+        a.role.toLowerCase().includes(q) ||
+        (a.platform || "").toLowerCase().includes(q)
+    );
+  }, [apps, query]);
+
+  const grouped = useMemo(() => {
+    const g = {};
+    STATUSES.forEach((s) => (g[s.key] = []));
+    filtered.forEach((a) => {
+      if (!g[a.status]) g[a.status] = [];
+      g[a.status].push(a);
+    });
+    // oldest-first within active columns so the most overdue floats up
+    Object.keys(g).forEach((k) => {
+      g[k].sort((x, y) => daysSince(y.appliedDate) - daysSince(x.appliedDate));
+    });
+    return g;
+  }, [filtered]);
+
+  const stats = useMemo(() => {
+    const total = apps.length;
+    const active = apps.filter((a) => a.status === "dilamar" || a.status === "wawancara").length;
+    const responded = apps.filter((a) => a.status === "wawancara" || a.status === "ditawari").length;
+    const responseRate = total ? Math.round((responded / total) * 100) : 0;
+    const needsFollowUp = apps.filter(
+      (a) => (a.status === "dilamar" || a.status === "wawancara") && daysSince(a.appliedDate) >= 14
+    ).length;
+    return { total, active, responseRate, needsFollowUp };
+  }, [apps]);
+
+  const editingApp = editingId ? apps.find((a) => a.id === editingId) : null;
+
+  return (
+    <div style={styles.page}>
+      <style>{`
+        * { box-sizing: border-box; }
+        ::selection { background: ${COLORS.goldLight}; }
+        input:focus, select:focus, textarea:focus, button:focus-visible {
+          outline: 2px solid ${COLORS.gold};
+          outline-offset: 2px;
+        }
+        @media (max-width: 880px) {
+          .board { grid-template-columns: 1fr !important; }
+          .headerRow { flex-direction: column; align-items: flex-start !important; gap: 14px; }
+          .statsRow { grid-template-columns: 1fr 1fr !important; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          * { animation: none !important; transition: none !important; }
+        }
+        .cardHover { transition: transform 0.15s ease, box-shadow 0.15s ease; }
+        .cardHover:hover { transform: translateY(-2px); box-shadow: 0 6px 18px rgba(27,46,40,0.10); }
+        .btnPrimary { transition: background 0.15s ease, transform 0.1s ease; }
+        .btnPrimary:hover { background: #163a2b; }
+        .btnPrimary:active { transform: scale(0.98); }
+      `}</style>
+
+      <header style={styles.header}>
+        <div className="headerRow" style={styles.headerRow}>
+          <div>
+            <div style={styles.eyebrow}>
+              PELACAK LAMARAN KERJA
+              {isPremium && (
+                <span style={styles.premiumBadge}><Star size={10} fill={COLORS.gold} color={COLORS.gold} /> PREMIUM</span>
+              )}
+            </div>
+            <h1 style={styles.title}>Setiap lamaran, terpantau.</h1>
+            <p style={styles.subtitle}>
+              Catat semua lamaran dan proyek yang kamu ajukan, supaya tidak ada satu pun yang
+              lolos untuk di-follow-up.
+            </p>
+          </div>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <button style={styles.exportBtn} onClick={exportCSV}>
+              {isPremium ? <Download size={16} /> : <Lock size={14} />}
+              Ekspor CSV
+            </button>
+            {!isPremium && (
+              <button style={styles.upgradeBtn} onClick={() => setUpgradeOpen(true)}>
+                <Sparkles size={16} />
+                Upgrade Premium
+              </button>
+            )}
+            <button className="btnPrimary" style={styles.addBtn} onClick={openAdd}>
+              <Plus size={18} strokeWidth={2.5} />
+              Tambah Lamaran
+            </button>
+          </div>
+        </div>
+
+        {!isPremium && (
+          <div style={styles.limitBar}>
+            <span>
+              {apps.length}/{FREE_LIMIT} lamaran terpakai di paket gratis
+            </span>
+            <button style={styles.limitLink} onClick={() => setUpgradeOpen(true)}>
+              Upgrade untuk lamaran tanpa batas →
+            </button>
+          </div>
+        )}
+
+        <div className="statsRow" style={styles.statsRow}>
+          <StatCard icon={<ClipboardList size={16} />} label="Total lamaran" value={stats.total} />
+          <StatCard icon={<Clock size={16} />} label="Sedang berjalan" value={stats.active} />
+          <StatCard icon={<TrendingUp size={16} />} label="Tingkat respons" value={`${stats.responseRate}%`} />
+          <StatCard
+            icon={<AlertCircle size={16} />}
+            label="Perlu follow-up"
+            value={stats.needsFollowUp}
+            alert={stats.needsFollowUp > 0}
+          />
+        </div>
+      </header>
+
+      <div style={styles.searchWrap}>
+        <Search size={17} color={COLORS.ash} />
+        <input
+          style={styles.searchInput}
+          placeholder="Cari berdasarkan perusahaan, posisi, atau platform..."
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+      </div>
+
+      {saveError && (
+        <div style={styles.errorBanner}>
+          Gagal menyimpan perubahan. Data mungkin tidak tersimpan — coba lagi sebentar.
+        </div>
+      )}
+
+      {loading ? (
+        <div style={styles.loadingWrap}>
+          <Loader2 size={22} className="spin" style={{ animation: "spin 1s linear infinite" }} />
+          <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+          <span>Memuat data...</span>
+        </div>
+      ) : apps.length === 0 ? (
+        <EmptyState onAdd={openAdd} />
+      ) : (
+        <div className="board" style={styles.board}>
+          {STATUSES.map((col) => (
+            <Column
+              key={col.key}
+              col={col}
+              items={grouped[col.key] || []}
+              onEdit={openEdit}
+              onDelete={(id) => setConfirmDeleteId(id)}
+              onChangeStatus={changeStatus}
+            />
+          ))}
+        </div>
+      )}
+
+      {modalOpen && (
+        <ApplicationModal
+          initial={editingApp}
+          isPremium={isPremium}
+          onUpgrade={() => { setModalOpen(false); setUpgradeOpen(true); }}
+          onClose={() => setModalOpen(false)}
+          onSave={saveApp}
+        />
+      )}
+
+      {confirmDeleteId && (
+        <ConfirmDelete
+          onCancel={() => setConfirmDeleteId(null)}
+          onConfirm={() => removeApp(confirmDeleteId)}
+        />
+      )}
+
+      {upgradeOpen && (
+        <UpgradeModal onClose={() => setUpgradeOpen(false)} onActivate={activatePremium} />
+      )}
+    </div>
+  );
+}
+
+function UpgradeModal({ onClose, onActivate }) {
+  return (
+    <div style={styles.overlay} onClick={onClose}>
+      <div style={styles.upgradeModal} onClick={(e) => e.stopPropagation()}>
+        <button style={styles.upgradeClose} onClick={onClose} aria-label="Tutup">
+          <X size={18} />
+        </button>
+        <div style={styles.upgradeIconWrap}>
+          <Sparkles size={22} color={COLORS.gold} />
+        </div>
+        <div style={styles.upgradeTitle}>Upgrade ke Premium</div>
+        <div style={styles.upgradePrice}>
+          Rp 19.000<span style={styles.upgradePriceUnit}>/bulan</span>
+        </div>
+        <ul style={styles.upgradeList}>
+          {PREMIUM_PERKS.map((p) => (
+            <li key={p} style={styles.upgradeListItem}>
+              <Star size={13} color={COLORS.gold} fill={COLORS.gold} style={{ flexShrink: 0, marginTop: 2 }} />
+              <span>{p}</span>
+            </li>
+          ))}
+        </ul>
+        <button className="btnPrimary" style={styles.upgradeCTA} onClick={onActivate}>
+          Aktifkan Premium
+        </button>
+        <div style={styles.upgradeNote}>
+          Ini adalah pratinjau. Di versi web sungguhan, tombol ini akan membuka pembayaran asli
+          (mis. QRIS / kartu via Midtrans) sebelum status premium aktif.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------
+   PIECES
+--------------------------------------------------------- */
+
+function StatCard({ icon, label, value, alert }) {
+  return (
+    <div style={{ ...styles.statCard, borderColor: alert ? COLORS.alert : COLORS.line }}>
+      <div style={{ ...styles.statIcon, color: alert ? COLORS.alert : COLORS.moss }}>{icon}</div>
+      <div>
+        <div style={{ ...styles.statValue, color: alert ? COLORS.alert : COLORS.ink }}>{value}</div>
+        <div style={styles.statLabel}>{label}</div>
+      </div>
+    </div>
+  );
+}
+
+function Column({ col, items, onEdit, onDelete, onChangeStatus }) {
+  return (
+    <div style={styles.column}>
+      <div style={{ ...styles.columnHeader, borderColor: col.accent }}>
+        <span style={{ ...styles.columnDot, background: col.accent }} />
+        <span style={styles.columnTitle}>{col.label}</span>
+        <span style={styles.columnCount}>{items.length}</span>
+      </div>
+      <div style={styles.columnBody}>
+        {items.length === 0 ? (
+          <div style={styles.columnEmpty}>Belum ada di tahap ini.</div>
+        ) : (
+          items.map((app) => (
+            <Card
+              key={app.id}
+              app={app}
+              col={col}
+              onEdit={() => onEdit(app.id)}
+              onDelete={() => onDelete(app.id)}
+              onChangeStatus={(status) => onChangeStatus(app.id, status)}
+            />
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Card({ app, col, onEdit, onDelete, onChangeStatus }) {
+  const isActive = app.status === "dilamar" || app.status === "wawancara";
+  const days = daysSince(app.appliedDate);
+  const tone = waitTone(days);
+  const [statusMenuOpen, setStatusMenuOpen] = useState(false);
+
+  return (
+    <div className="cardHover" style={styles.card}>
+      <div style={styles.cardTop}>
+        <div style={{ minWidth: 0 }}>
+          <div style={styles.cardCompany}>
+            <Building2 size={13} color={COLORS.ash} style={{ flexShrink: 0 }} />
+            <span style={styles.cardCompanyText}>{app.company}</span>
+            {app.priority && <Star size={11} color={COLORS.gold} fill={COLORS.gold} style={{ flexShrink: 0 }} />}
+          </div>
+          <div style={styles.cardRole}>{app.role}</div>
+        </div>
+        {isActive && (
+          <span style={{ ...styles.waitChip, background: tone.bg, color: tone.fg }}>
+            {tone.label}
+          </span>
+        )}
+      </div>
+
+      <div style={styles.cardMeta}>
+        <span style={styles.metaItem}>
+          <Calendar size={12} /> {formatDateID(app.appliedDate)}
+        </span>
+        {app.platform && (
+          <span style={styles.metaTag}>
+            <Briefcase size={11} /> {app.platform}
+          </span>
+        )}
+        {app.followUpDate && (
+          <span style={styles.reminderTag}>
+            <Bell size={11} /> Follow-up {formatDateID(app.followUpDate)}
+          </span>
+        )}
+      </div>
+
+      {app.notes && <div style={styles.cardNotes}>{app.notes}</div>}
+
+      <div style={styles.cardFooter}>
+        <div style={{ position: "relative" }}>
+          <button
+            style={{ ...styles.statusPill, color: col.accent, borderColor: col.accent }}
+            onClick={() => setStatusMenuOpen((v) => !v)}
+          >
+            Ubah status <ChevronDown size={12} />
+          </button>
+          {statusMenuOpen && (
+            <div style={styles.statusMenu}>
+              {STATUSES.map((s) => (
+                <button
+                  key={s.key}
+                  style={{
+                    ...styles.statusMenuItem,
+                    fontWeight: s.key === app.status ? 700 : 400,
+                  }}
+                  onClick={() => {
+                    onChangeStatus(s.key);
+                    setStatusMenuOpen(false);
+                  }}
+                >
+                  <span style={{ ...styles.columnDot, background: s.accent }} />
+                  {s.label}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+        <div style={{ display: "flex", gap: 4 }}>
+          <button style={styles.iconBtn} onClick={onEdit} aria-label="Edit lamaran">
+            <Pencil size={14} />
+          </button>
+          <button style={styles.iconBtn} onClick={onDelete} aria-label="Hapus lamaran">
+            <Trash2 size={14} />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EmptyState({ onAdd }) {
+  return (
+    <div style={styles.emptyWrap}>
+      <Inbox size={34} color={COLORS.moss} style={{ marginBottom: 10 }} />
+      <div style={styles.emptyTitle}>Belum ada lamaran tercatat</div>
+      <div style={styles.emptyText}>
+        Mulai catat lamaran atau proyek yang kamu ajukan. Setiap satu yang tercatat, satu langkah
+        lebih dekat untuk tahu kapan harus follow-up.
+      </div>
+      <button className="btnPrimary" style={styles.addBtn} onClick={onAdd}>
+        <Plus size={18} strokeWidth={2.5} />
+        Tambah Lamaran Pertama
+      </button>
+    </div>
+  );
+}
+
+function ConfirmDelete({ onCancel, onConfirm }) {
+  return (
+    <div style={styles.overlay} onClick={onCancel}>
+      <div style={styles.confirmBox} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.confirmTitle}>Hapus catatan ini?</div>
+        <div style={styles.confirmText}>Data lamaran ini akan dihapus permanen dan tidak bisa dikembalikan.</div>
+        <div style={{ display: "flex", gap: 10, marginTop: 18, justifyContent: "flex-end" }}>
+          <button style={styles.ghostBtn} onClick={onCancel}>Batal</button>
+          <button style={styles.dangerBtn} onClick={onConfirm}>Hapus</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ApplicationModal({ initial, isPremium, onUpgrade, onClose, onSave }) {
+  const [company, setCompany] = useState(initial?.company || "");
+  const [role, setRole] = useState(initial?.role || "");
+  const [platform, setPlatform] = useState(initial?.platform || PLATFORMS[0]);
+  const [appliedDate, setAppliedDate] = useState(initial?.appliedDate || todayISO());
+  const [status, setStatus] = useState(initial?.status || "dilamar");
+  const [notes, setNotes] = useState(initial?.notes || "");
+  const [followUpDate, setFollowUpDate] = useState(initial?.followUpDate || "");
+  const [priority, setPriority] = useState(initial?.priority || false);
+  const [touched, setTouched] = useState(false);
+
+  const canSave = company.trim().length > 0 && role.trim().length > 0;
+
+  const handleSave = () => {
+    setTouched(true);
+    if (!canSave) return;
+    onSave({
+      company: company.trim(), role: role.trim(), platform, appliedDate, status,
+      notes: notes.trim(), followUpDate: isPremium ? followUpDate : "", priority: isPremium ? priority : false,
+    });
+  };
+
+  return (
+    <div style={styles.overlay} onClick={onClose}>
+      <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.modalHeader}>
+          <span style={styles.modalTitle}>
+            {initial ? "Edit Lamaran" : "Tambah Lamaran Baru"}
+          </span>
+          <button style={styles.iconBtn} onClick={onClose} aria-label="Tutup">
+            <X size={18} />
+          </button>
+        </div>
+
+        <div style={styles.modalBody}>
+          <Field label="Nama Perusahaan / Klien" required>
+            <input
+              style={styles.input}
+              value={company}
+              onChange={(e) => setCompany(e.target.value)}
+              placeholder="cth. PT Sumber Makmur"
+            />
+            {touched && !company.trim() && <FieldError text="Wajib diisi" />}
+          </Field>
+
+          <Field label="Posisi / Judul Proyek" required>
+            <input
+              style={styles.input}
+              value={role}
+              onChange={(e) => setRole(e.target.value)}
+              placeholder="cth. Content Writer Freelance"
+            />
+            {touched && !role.trim() && <FieldError text="Wajib diisi" />}
+          </Field>
+
+          <div style={{ display: "flex", gap: 12 }}>
+            <Field label="Platform" style={{ flex: 1 }}>
+              <select style={styles.input} value={platform} onChange={(e) => setPlatform(e.target.value)}>
+                {PLATFORMS.map((p) => (
+                  <option key={p} value={p}>{p}</option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Tanggal Melamar" style={{ flex: 1 }}>
+              <input
+                type="date"
+                style={styles.input}
+                value={appliedDate}
+                onChange={(e) => setAppliedDate(e.target.value)}
+              />
+            </Field>
+          </div>
+
+          <Field label="Status">
+            <select style={styles.input} value={status} onChange={(e) => setStatus(e.target.value)}>
+              {STATUSES.map((s) => (
+                <option key={s.key} value={s.key}>{s.label}</option>
+              ))}
+            </select>
+          </Field>
+
+          <Field label="Catatan (opsional)">
+            <textarea
+              style={{ ...styles.input, minHeight: 72, resize: "vertical", fontFamily: "inherit" }}
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              placeholder="cth. Sudah interview dengan HRD, tunggu kabar minggu depan"
+            />
+          </Field>
+
+          <div style={styles.premiumFieldBox}>
+            <div style={styles.premiumFieldHeader}>
+              <Bell size={14} color={isPremium ? COLORS.gold : COLORS.ash} />
+              <span>Pengingat Follow-up &amp; Prioritas</span>
+              {!isPremium && <span style={styles.premiumTag}>PREMIUM</span>}
+            </div>
+            {isPremium ? (
+              <>
+                <Field label="Tanggal Follow-up">
+                  <input
+                    type="date"
+                    style={styles.input}
+                    value={followUpDate}
+                    onChange={(e) => setFollowUpDate(e.target.value)}
+                  />
+                </Field>
+                <label style={styles.checkboxRow}>
+                  <input type="checkbox" checked={priority} onChange={(e) => setPriority(e.target.checked)} />
+                  Tandai sebagai prioritas tinggi
+                </label>
+              </>
+            ) : (
+              <button type="button" style={styles.premiumUnlockBtn} onClick={onUpgrade}>
+                <Lock size={12} /> Buka dengan Premium
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div style={styles.modalFooter}>
+          <button style={styles.ghostBtn} onClick={onClose}>Batal</button>
+          <button className="btnPrimary" style={styles.saveBtn} onClick={handleSave}>
+            {initial ? "Simpan Perubahan" : "Tambah Lamaran"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Field({ label, required, children, style }) {
+  return (
+    <label style={{ display: "block", marginBottom: 14, ...style }}>
+      <div style={styles.fieldLabel}>
+        {label} {required && <span style={{ color: COLORS.alert }}>*</span>}
+      </div>
+      {children}
+    </label>
+  );
+}
+
+function FieldError({ text }) {
+  return <div style={{ fontSize: 12, color: COLORS.alert, marginTop: 4 }}>{text}</div>;
+}
+
+/* ---------------------------------------------------------
+   STYLES
+--------------------------------------------------------- */
+
+const styles = {
+  page: {
+    fontFamily: "system-ui, -apple-system, 'Segoe UI', sans-serif",
+    background: COLORS.parchment,
+    minHeight: "100vh",
+    color: COLORS.ink,
+    padding: "28px 32px 60px",
+  },
+  header: { maxWidth: 1180, margin: "0 auto 22px" },
+  headerRow: { display: "flex", justifyContent: "space-between", alignItems: "flex-end", gap: 24 },
+  eyebrow: {
+    fontSize: 11.5, fontWeight: 700, letterSpacing: "0.14em", color: COLORS.moss, marginBottom: 8,
+  },
+  title: {
+    fontFamily: "Georgia, 'Times New Roman', serif",
+    fontSize: 34, fontWeight: 700, margin: "0 0 8px", color: COLORS.ink, lineHeight: 1.15,
+  },
+  subtitle: { fontSize: 14.5, color: COLORS.ash, maxWidth: 480, lineHeight: 1.55, margin: 0 },
+  addBtn: {
+    display: "flex", alignItems: "center", gap: 8, background: COLORS.evergreen, color: "#fff",
+    border: "none", borderRadius: 10, padding: "12px 20px", fontSize: 14.5, fontWeight: 600,
+    cursor: "pointer", whiteSpace: "nowrap", boxShadow: "0 4px 12px rgba(27,67,50,0.18)",
+  },
+  statsRow: {
+    display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginTop: 26,
+  },
+  statCard: {
+    display: "flex", alignItems: "center", gap: 12, background: "#fff",
+    border: "1px solid", borderRadius: 12, padding: "14px 16px",
+  },
+  statIcon: {
+    width: 34, height: 34, borderRadius: 9, background: COLORS.mossLight,
+    display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
+  },
+  statValue: { fontSize: 20, fontWeight: 700, lineHeight: 1.1, fontFamily: "ui-monospace, monospace" },
+  statLabel: { fontSize: 12, color: COLORS.ash, marginTop: 2 },
+  searchWrap: {
+    maxWidth: 1180, margin: "0 auto 22px", display: "flex", alignItems: "center", gap: 10,
+    background: "#fff", border: `1px solid ${COLORS.line}`, borderRadius: 10, padding: "11px 16px",
+  },
+  searchInput: {
+    border: "none", outline: "none", flex: 1, fontSize: 14, background: "transparent", color: COLORS.ink,
+  },
+  errorBanner: {
+    maxWidth: 1180, margin: "0 auto 18px", background: COLORS.alertLight, color: COLORS.alert,
+    borderRadius: 10, padding: "10px 16px", fontSize: 13.5,
+  },
+  loadingWrap: {
+    display: "flex", alignItems: "center", gap: 10, justifyContent: "center",
+    padding: "60px 0", color: COLORS.ash, fontSize: 14,
+  },
+  board: {
+    maxWidth: 1180, margin: "0 auto", display: "grid",
+    gridTemplateColumns: "repeat(4, 1fr)", gap: 16, alignItems: "start",
+  },
+  column: { background: "#EFEADC", borderRadius: 14, padding: 12, minHeight: 120 },
+  columnHeader: {
+    display: "flex", alignItems: "center", gap: 8, padding: "4px 4px 12px",
+    borderBottom: "2px solid", marginBottom: 10,
+  },
+  columnDot: { width: 8, height: 8, borderRadius: "50%", flexShrink: 0 },
+  columnTitle: { fontSize: 13.5, fontWeight: 700, color: COLORS.ink, flex: 1 },
+  columnCount: {
+    fontSize: 11.5, color: COLORS.ash, background: "#fff", borderRadius: 20,
+    padding: "1px 8px", fontFamily: "ui-monospace, monospace",
+  },
+  columnBody: { display: "flex", flexDirection: "column", gap: 10 },
+  columnEmpty: { fontSize: 12.5, color: COLORS.ash, padding: "18px 8px", textAlign: "center" },
+  card: {
+    background: "#fff", borderRadius: 12, padding: 14, border: `1px solid ${COLORS.line}`,
+  },
+  cardTop: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 },
+  cardCompany: { display: "flex", alignItems: "center", gap: 5, marginBottom: 2 },
+  cardCompanyText: {
+    fontSize: 11.5, color: COLORS.ash, fontWeight: 600, textTransform: "uppercase",
+    letterSpacing: "0.03em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+  },
+  cardRole: { fontSize: 15, fontWeight: 700, color: COLORS.ink, lineHeight: 1.3 },
+  waitChip: {
+    fontSize: 11, fontWeight: 700, borderRadius: 20, padding: "3px 9px", flexShrink: 0,
+    fontFamily: "ui-monospace, monospace",
+  },
+  cardMeta: { display: "flex", flexWrap: "wrap", gap: 8, marginTop: 10 },
+  metaItem: { display: "flex", alignItems: "center", gap: 4, fontSize: 11.5, color: COLORS.ash },
+  metaTag: {
+    display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: COLORS.moss,
+    background: COLORS.mossLight, borderRadius: 6, padding: "2px 7px",
+  },
+  cardNotes: {
+    fontSize: 12.5, color: "#4a4237", marginTop: 10, lineHeight: 1.5,
+    background: COLORS.parchment, borderRadius: 8, padding: "8px 10px",
+  },
+  cardFooter: {
+    display: "flex", justifyContent: "space-between", alignItems: "center",
+    marginTop: 12, paddingTop: 10, borderTop: `1px solid ${COLORS.line}`,
+  },
+  statusPill: {
+    display: "flex", alignItems: "center", gap: 4, fontSize: 11.5, fontWeight: 600,
+    background: "#fff", border: "1px solid", borderRadius: 20, padding: "4px 10px", cursor: "pointer",
+  },
+  statusMenu: {
+    position: "absolute", bottom: "115%", left: 0, background: "#fff",
+    border: `1px solid ${COLORS.line}`, borderRadius: 10, padding: 6, zIndex: 5,
+    boxShadow: "0 8px 24px rgba(27,46,40,0.15)", minWidth: 180,
+  },
+  statusMenuItem: {
+    display: "flex", alignItems: "center", gap: 8, width: "100%", textAlign: "left",
+    border: "none", background: "transparent", padding: "7px 8px", borderRadius: 6,
+    fontSize: 12.5, color: COLORS.ink, cursor: "pointer",
+  },
+  iconBtn: {
+    width: 28, height: 28, borderRadius: 7, border: `1px solid ${COLORS.line}`, background: "#fff",
+    display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: COLORS.ash,
+  },
+  emptyWrap: {
+    maxWidth: 460, margin: "60px auto", textAlign: "center", display: "flex",
+    flexDirection: "column", alignItems: "center",
+  },
+  emptyTitle: { fontSize: 18, fontWeight: 700, marginBottom: 8, fontFamily: "Georgia, serif" },
+  emptyText: { fontSize: 13.5, color: COLORS.ash, lineHeight: 1.6, marginBottom: 20 },
+  overlay: {
+    position: "fixed", inset: 0, background: "rgba(27,46,40,0.45)", display: "flex",
+    alignItems: "center", justifyContent: "center", padding: 20, zIndex: 50,
+  },
+  modal: {
+    background: "#fff", borderRadius: 16, width: "100%", maxWidth: 480,
+    maxHeight: "88vh", display: "flex", flexDirection: "column", overflow: "hidden",
+  },
+  modalHeader: {
+    display: "flex", justifyContent: "space-between", alignItems: "center",
+    padding: "18px 20px", borderBottom: `1px solid ${COLORS.line}`,
+  },
+  modalTitle: { fontSize: 16.5, fontWeight: 700, fontFamily: "Georgia, serif" },
+  modalBody: { padding: "18px 20px", overflowY: "auto" },
+  modalFooter: {
+    display: "flex", justifyContent: "flex-end", gap: 10, padding: "16px 20px",
+    borderTop: `1px solid ${COLORS.line}`,
+  },
+  fieldLabel: { fontSize: 12.5, fontWeight: 600, color: COLORS.ink, marginBottom: 6 },
+  input: {
+    width: "100%", border: `1px solid ${COLORS.line}`, borderRadius: 8, padding: "9px 11px",
+    fontSize: 13.5, color: COLORS.ink, background: "#fff",
+  },
+  ghostBtn: {
+    background: "transparent", border: `1px solid ${COLORS.line}`, borderRadius: 8,
+    padding: "9px 16px", fontSize: 13.5, fontWeight: 600, color: COLORS.ink, cursor: "pointer",
+  },
+  saveBtn: {
+    background: COLORS.evergreen, color: "#fff", border: "none", borderRadius: 8,
+    padding: "9px 18px", fontSize: 13.5, fontWeight: 600, cursor: "pointer",
+  },
+  dangerBtn: {
+    background: COLORS.alert, color: "#fff", border: "none", borderRadius: 8,
+    padding: "9px 16px", fontSize: 13.5, fontWeight: 600, cursor: "pointer",
+  },
+  confirmBox: { background: "#fff", borderRadius: 14, padding: 22, maxWidth: 360, width: "100%" },
+  confirmTitle: { fontSize: 16, fontWeight: 700, marginBottom: 6 },
+  confirmText: { fontSize: 13, color: COLORS.ash, lineHeight: 1.5 },
+
+  premiumBadge: {
+    display: "inline-flex", alignItems: "center", gap: 4, marginLeft: 10,
+    background: COLORS.goldLight, color: "#8A6A2F", borderRadius: 20,
+    padding: "2px 8px", fontSize: 10.5, fontWeight: 700, letterSpacing: "0.04em",
+  },
+  exportBtn: {
+    display: "flex", alignItems: "center", gap: 7, background: "#fff", color: COLORS.ink,
+    border: `1px solid ${COLORS.line}`, borderRadius: 10, padding: "11px 16px",
+    fontSize: 13.5, fontWeight: 600, cursor: "pointer",
+  },
+  upgradeBtn: {
+    display: "flex", alignItems: "center", gap: 7, background: "#fff", color: "#8A6A2F",
+    border: `1px solid ${COLORS.gold}`, borderRadius: 10, padding: "11px 16px",
+    fontSize: 13.5, fontWeight: 700, cursor: "pointer",
+  },
+  limitBar: {
+    display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8,
+    marginTop: 18, background: COLORS.goldLight, borderRadius: 10, padding: "9px 14px",
+    fontSize: 12.5, color: "#8A6A2F", fontWeight: 600,
+  },
+  limitLink: {
+    background: "transparent", border: "none", color: "#8A6A2F", fontWeight: 700,
+    fontSize: 12.5, cursor: "pointer", textDecoration: "underline", padding: 0,
+  },
+  reminderTag: {
+    display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: "#8A6A2F",
+    background: COLORS.goldLight, borderRadius: 6, padding: "2px 7px",
+  },
+  premiumFieldBox: {
+    border: `1px dashed ${COLORS.gold}`, borderRadius: 10, padding: 12, marginTop: 4, background: "#FCFAF3",
+  },
+  premiumFieldHeader: {
+    display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, fontWeight: 700,
+    color: COLORS.ink, marginBottom: 10,
+  },
+  premiumTag: {
+    background: COLORS.gold, color: "#fff", fontSize: 9.5, fontWeight: 700,
+    borderRadius: 4, padding: "1px 6px", letterSpacing: "0.04em",
+  },
+  premiumUnlockBtn: {
+    display: "flex", alignItems: "center", gap: 6, background: COLORS.gold, color: "#fff",
+    border: "none", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer",
+  },
+  checkboxRow: {
+    display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: COLORS.ink, cursor: "pointer",
+  },
+  upgradeModal: {
+    background: "#fff", borderRadius: 18, width: "100%", maxWidth: 400, padding: "30px 26px",
+    position: "relative", textAlign: "center",
+  },
+  upgradeClose: {
+    position: "absolute", top: 14, right: 14, background: "transparent", border: "none",
+    cursor: "pointer", color: COLORS.ash,
+  },
+  upgradeIconWrap: {
+    width: 48, height: 48, borderRadius: "50%", background: COLORS.goldLight,
+    display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 14px",
+  },
+  upgradeTitle: { fontSize: 19, fontWeight: 700, fontFamily: "Georgia, serif", marginBottom: 6 },
+  upgradePrice: { fontSize: 26, fontWeight: 700, color: COLORS.evergreen, marginBottom: 16 },
+  upgradePriceUnit: { fontSize: 13, fontWeight: 500, color: COLORS.ash },
+  upgradeList: { listStyle: "none", padding: 0, margin: "0 0 20px", textAlign: "left" },
+  upgradeListItem: {
+    display: "flex", gap: 8, fontSize: 13.5, color: COLORS.ink, marginBottom: 10, lineHeight: 1.4,
+  },
+  upgradeCTA: {
+    width: "100%", background: COLORS.evergreen, color: "#fff", border: "none", borderRadius: 10,
+    padding: "13px 0", fontSize: 14.5, fontWeight: 700, cursor: "pointer",
+  },
+  upgradeNote: { fontSize: 11.5, color: COLORS.ash, marginTop: 14, lineHeight: 1.5 },
+};
