@@ -43,10 +43,22 @@ const PLATFORMS = ["LinkedIn", "Jobstreet", "Glints", "Upwork", "Fiverr", "Insta
 
 const STORAGE_KEY = "job-tracker:applications";
 const PREMIUM_KEY = "job-tracker:premium";
-const FREE_LIMIT = 10;
+const TRIAL_START_KEY = "job-tracker:trial-start";
+const TRIAL_DAYS = 7;
+
+// GANTI kode ini dengan kode rahasiamu sendiri sebelum deploy.
+// Kode ini yang kamu berikan ke pembeli setelah mereka bayar.
+const ACTIVATION_CODE = "QBXTWZR";
+
+// Sesuaikan dengan info pembayaranmu sendiri
+const PAYMENT_INFO = {
+  price: "Rp 19.000/bulan",
+  bank: "BCA 0310252077 a.n. Farikhatul Mahmudah",
+  whatsapp: "6281363301190",
+};
 
 const PREMIUM_PERKS = [
-  "Lamaran tanpa batas (gratis dibatasi 10)",
+  "Tambah lamaran tanpa batas",
   "Pengingat tanggal follow-up otomatis",
   "Ekspor semua data ke CSV / Excel",
   "Tandai prioritas pada lamaran penting",
@@ -90,6 +102,8 @@ export default function App() {
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const [isPremium, setIsPremium] = useState(false);
   const [upgradeOpen, setUpgradeOpen] = useState(false);
+  const [trialDaysLeft, setTrialDaysLeft] = useState(TRIAL_DAYS);
+  const [trialExpired, setTrialExpired] = useState(false);
 
   // Load from persistent storage
   useEffect(() => {
@@ -107,24 +121,39 @@ export default function App() {
         if (premRes && premRes.value) setIsPremium(premRes.value === "true");
       } catch (e) {
         // no premium flag yet
+      }
+      try {
+        let start = localStorage.getItem(TRIAL_START_KEY);
+        if (!start) {
+          start = todayISO();
+          localStorage.setItem(TRIAL_START_KEY, start);
+        }
+        const used = daysSince(start);
+        setTrialDaysLeft(Math.max(0, TRIAL_DAYS - used));
+        setTrialExpired(used >= TRIAL_DAYS);
+      } catch (e) {
+        // if trial tracking fails, don't block the app
       } finally {
         setLoading(false);
       }
     })();
   }, []);
 
-  const activatePremium = async () => {
-    setIsPremium(true);
-    try {
-      localStorage.setItem(PREMIUM_KEY, "true");
-    } catch (e) {
-      // ignore — UI already reflects unlocked state for this session
+  // During the 7-day trial, full premium features are unlocked automatically.
+  const effectivePremium = isPremium || !trialExpired;
+
+  const activateWithCode = (code) => {
+    const ok = code.trim().toUpperCase() === ACTIVATION_CODE.toUpperCase();
+    if (ok) {
+      setIsPremium(true);
+      try { localStorage.setItem(PREMIUM_KEY, "true"); } catch (e) {}
+      setUpgradeOpen(false);
     }
-    setUpgradeOpen(false);
+    return ok;
   };
 
   const exportCSV = () => {
-    if (!isPremium) { setUpgradeOpen(true); return; }
+    if (!effectivePremium) { setUpgradeOpen(true); return; }
     const header = ["Perusahaan/Klien", "Posisi/Proyek", "Platform", "Tanggal Melamar", "Status", "Prioritas", "Follow-up", "Catatan"];
     const rows = apps.map((a) => [
       a.company, a.role, a.platform || "",
@@ -155,7 +184,7 @@ export default function App() {
   }, []);
 
   const openAdd = () => {
-    if (!isPremium && apps.length >= FREE_LIMIT) { setUpgradeOpen(true); return; }
+    if (!effectivePremium) { setUpgradeOpen(true); return; }
     setEditingId(null);
     setModalOpen(true);
   };
@@ -246,8 +275,12 @@ export default function App() {
           <div>
             <div style={styles.eyebrow}>
               PELACAK LAMARAN KERJA
-              {isPremium && (
+              {isPremium ? (
                 <span style={styles.premiumBadge}><Star size={10} fill={COLORS.gold} color={COLORS.gold} /> PREMIUM</span>
+              ) : !trialExpired ? (
+                <span style={styles.premiumBadge}><Star size={10} fill={COLORS.gold} color={COLORS.gold} /> TRIAL · {trialDaysLeft} HARI LAGI</span>
+              ) : (
+                <span style={styles.trialExpiredBadge}>TRIAL BERAKHIR</span>
               )}
             </div>
             <h1 style={styles.title}>Setiap lamaran, terpantau.</h1>
@@ -258,13 +291,13 @@ export default function App() {
           </div>
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
             <button style={styles.exportBtn} onClick={exportCSV}>
-              {isPremium ? <Download size={16} /> : <Lock size={14} />}
+              {effectivePremium ? <Download size={16} /> : <Lock size={14} />}
               Ekspor CSV
             </button>
             {!isPremium && (
               <button style={styles.upgradeBtn} onClick={() => setUpgradeOpen(true)}>
                 <Sparkles size={16} />
-                Upgrade Premium
+                {trialExpired ? "Upgrade Sekarang" : "Upgrade Premium"}
               </button>
             )}
             <button className="btnPrimary" style={styles.addBtn} onClick={openAdd}>
@@ -275,12 +308,14 @@ export default function App() {
         </div>
 
         {!isPremium && (
-          <div style={styles.limitBar}>
+          <div style={{ ...styles.limitBar, ...(trialExpired ? styles.limitBarAlert : {}) }}>
             <span>
-              {apps.length}/{FREE_LIMIT} lamaran terpakai di paket gratis
+              {trialExpired
+                ? "Trial 7 hari sudah berakhir — kamu masih bisa lihat & kelola data lama, tapi tidak bisa tambah lamaran baru."
+                : `Trial premium aktif — sisa ${trialDaysLeft} hari lagi sebelum perlu upgrade.`}
             </span>
-            <button style={styles.limitLink} onClick={() => setUpgradeOpen(true)}>
-              Upgrade untuk lamaran tanpa batas →
+            <button style={{ ...styles.limitLink, ...(trialExpired ? { color: COLORS.alert } : {}) }} onClick={() => setUpgradeOpen(true)}>
+              {trialExpired ? "Upgrade sekarang →" : "Lihat detail upgrade →"}
             </button>
           </div>
         )}
@@ -340,7 +375,7 @@ export default function App() {
       {modalOpen && (
         <ApplicationModal
           initial={editingApp}
-          isPremium={isPremium}
+          isPremium={effectivePremium}
           onUpgrade={() => { setModalOpen(false); setUpgradeOpen(true); }}
           onClose={() => setModalOpen(false)}
           onSave={saveApp}
@@ -355,13 +390,30 @@ export default function App() {
       )}
 
       {upgradeOpen && (
-        <UpgradeModal onClose={() => setUpgradeOpen(false)} onActivate={activatePremium} />
+        <UpgradeModal
+          trialExpired={trialExpired}
+          trialDaysLeft={trialDaysLeft}
+          onClose={() => setUpgradeOpen(false)}
+          onActivateCode={activateWithCode}
+        />
       )}
     </div>
   );
 }
 
-function UpgradeModal({ onClose, onActivate }) {
+function UpgradeModal({ trialExpired, trialDaysLeft, onClose, onActivateCode }) {
+  const [code, setCode] = useState("");
+  const [error, setError] = useState(false);
+
+  const handleActivate = () => {
+    const ok = onActivateCode(code);
+    setError(!ok);
+  };
+
+  const waLink = `https://wa.me/${PAYMENT_INFO.whatsapp}?text=${encodeURIComponent(
+    "Halo, saya sudah transfer untuk upgrade Premium Pelacak Lamaran Kerja. Ini bukti transfernya:"
+  )}`;
+
   return (
     <div style={styles.overlay} onClick={onClose}>
       <div style={styles.upgradeModal} onClick={(e) => e.stopPropagation()}>
@@ -371,9 +423,16 @@ function UpgradeModal({ onClose, onActivate }) {
         <div style={styles.upgradeIconWrap}>
           <Sparkles size={22} color={COLORS.gold} />
         </div>
-        <div style={styles.upgradeTitle}>Upgrade ke Premium</div>
+        <div style={styles.upgradeTitle}>
+          {trialExpired ? "Trial 7 Hari Kamu Sudah Berakhir" : `Upgrade ke Premium`}
+        </div>
+        {!trialExpired && (
+          <div style={{ fontSize: 12.5, color: COLORS.ash, marginBottom: 4 }}>
+            Sisa trial gratis: {trialDaysLeft} hari lagi
+          </div>
+        )}
         <div style={styles.upgradePrice}>
-          Rp 19.000<span style={styles.upgradePriceUnit}>/bulan</span>
+          {PAYMENT_INFO.price}
         </div>
         <ul style={styles.upgradeList}>
           {PREMIUM_PERKS.map((p) => (
@@ -383,12 +442,32 @@ function UpgradeModal({ onClose, onActivate }) {
             </li>
           ))}
         </ul>
-        <button className="btnPrimary" style={styles.upgradeCTA} onClick={onActivate}>
-          Aktifkan Premium
-        </button>
+
+        <div style={styles.paymentBox}>
+          <div style={styles.paymentStep}>1. Transfer ke: <strong>{PAYMENT_INFO.bank}</strong></div>
+          <a href={waLink} target="_blank" rel="noopener noreferrer" style={styles.paymentWaLink}>
+            2. Kirim bukti transfer via WhatsApp →
+          </a>
+          <div style={styles.paymentStep}>3. Kamu akan dibalas kode aktivasi, masukkan di bawah ini:</div>
+        </div>
+
+        <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+          <input
+            style={{ ...styles.input, flex: 1 }}
+            placeholder="Masukkan kode aktivasi"
+            value={code}
+            onChange={(e) => { setCode(e.target.value); setError(false); }}
+          />
+          <button className="btnPrimary" style={styles.activateBtn} onClick={handleActivate}>
+            Aktifkan
+          </button>
+        </div>
+        {error && <div style={{ fontSize: 12, color: COLORS.alert, marginTop: 6 }}>Kode salah, coba cek lagi.</div>}
+
         <div style={styles.upgradeNote}>
-          Ini adalah pratinjau. Di versi web sungguhan, tombol ini akan membuka pembayaran asli
-          (mis. QRIS / kartu via Midtrans) sebelum status premium aktif.
+          Belum bayar dan cuma mau coba dulu? Fitur ini masih demo — kode aktivasi contohnya
+          ada di kode sumber aplikasi (constant ACTIVATION_CODE), ganti dengan kodemu sendiri
+          sebelum dipakai orang lain.
         </div>
       </div>
     </div>
@@ -933,4 +1012,26 @@ const styles = {
     padding: "13px 0", fontSize: 14.5, fontWeight: 700, cursor: "pointer",
   },
   upgradeNote: { fontSize: 11.5, color: COLORS.ash, marginTop: 14, lineHeight: 1.5 },
+
+  trialExpiredBadge: {
+    display: "inline-flex", alignItems: "center", gap: 4, marginLeft: 10,
+    background: COLORS.alertLight, color: COLORS.alert, borderRadius: 20,
+    padding: "2px 8px", fontSize: 10.5, fontWeight: 700, letterSpacing: "0.04em",
+  },
+  limitBarAlert: {
+    background: COLORS.alertLight, color: COLORS.alert,
+  },
+  paymentBox: {
+    background: COLORS.parchment, borderRadius: 10, padding: "12px 14px", marginTop: 16,
+    textAlign: "left",
+  },
+  paymentStep: { fontSize: 12.5, color: COLORS.ink, marginBottom: 6, lineHeight: 1.5 },
+  paymentWaLink: {
+    display: "block", fontSize: 12.5, color: COLORS.evergreen, fontWeight: 700,
+    marginBottom: 6, textDecoration: "underline",
+  },
+  activateBtn: {
+    background: COLORS.evergreen, color: "#fff", border: "none", borderRadius: 8,
+    padding: "0 18px", fontSize: 13, fontWeight: 700, cursor: "pointer",
+  },
 };
